@@ -133,11 +133,12 @@ def measure_neural_collapse(self, dl, epoch=-1, log=False):
     '''
     Calculate covariance within classes and between classes. We can calculate this over
     raw vectors rather than centered vectors because covariance is invariate to shifts.
-    We expand the within-class covariances and class means to match the number of data 
-    points within each class in order to account for unbalanced classes.
+    We weight the classes in order to account for unbalanced datasets.
     '''
-    within_class_cov = {idx:features.T.cov(correction=0).repeat((features.shape[0],1,1)) for idx, features in class_features.items()}
-    within_class_cov = torch.cat(list(within_class_cov.values())).mean(dim=0)
+    class_weights = torch.tensor([features.shape[0] for features in class_features.values()]).to(device)
+    class_weights = class_weights / class_weights.sum()
+    within_class_cov = torch.stack([features.T.cov(correction=0) for features in class_features.values()])
+    within_class_cov = (within_class_cov * class_weights[:,None,None]).sum(dim=0)
     between_class_cov = {idx:class_means[idx].repeat((features.shape[0],1)) for idx, features in class_features.items()}
     between_class_cov = torch.cat(list(between_class_cov.values())).T.cov(correction=0)
     normalized_cov = torch.matmul(within_class_cov, torch.linalg.pinv(between_class_cov))
