@@ -62,7 +62,7 @@ def fit(self, train_dl, optimizer, scheduler, epochs=None, nc_steps=1, val_dl=No
                 loss_mean.backward()
                 optimizer.step()
             if epoch % nc_steps == 0:
-                _ = self.measure_neural_collapse(val_dl, epoch=epoch, log=True, error=error.item(), loss=loss_sum.item())
+                _ = self.measure_neural_collapse(val_dl, epoch=epoch, log=True)
             scheduler.step()
             print(f'{epoch:<10} {error:<10} {loss_sum:.4f}')
         start_epoch = epoch
@@ -83,17 +83,15 @@ def fit(self, train_dl, optimizer, scheduler, epochs=None, nc_steps=1, val_dl=No
             loss_mean.backward()
             optimizer.step()
         if epoch % nc_steps == 0:
-            _ = self.measure_neural_collapse(val_dl, epoch=epoch, log=True, error=error.item(), loss=loss_sum.item())
+            _ = self.measure_neural_collapse(val_dl, epoch=epoch, log=True)
         scheduler.step()
         print(f'{epoch:<10} {error:<10} {loss_sum:.4f}')
 
-    _ = self.measure_neural_collapse(val_dl, epoch=epoch, log=True, error=error.item(), loss=loss_sum.item())
+    _ = self.measure_neural_collapse(val_dl, epoch=epoch, log=True)
     log = pd.DataFrame(self.log).set_index('Epochs')
-    log.loc[0,'Class Error'] = log.loc[1,'Class Error']
-    log.loc[0,'CE Loss'] = log.loc[1,'CE Loss']
     return log
 
-def measure_neural_collapse(self, dl, epoch=-1, log=False, error=0, loss=0):
+def measure_neural_collapse(self, dl, epoch=-1, log=False):
     all_features = []
     all_labels = []
     all_preds = []
@@ -104,13 +102,20 @@ def measure_neural_collapse(self, dl, epoch=-1, log=False, error=0, loss=0):
     # Run model on all inputs while storing last-layer feature activations
     hook = self.fc.register_forward_pre_hook(feature_activations)
     with torch.no_grad():
+        error = 0
+        loss_sum = 0
+        ce_loss_sum = nn.CrossEntropyLoss(reduction='sum')
         for batch in dl:
             image, class_labels = batch
             image, class_labels = image.to(device), class_labels.to(device)
             pred = self.forward(image)
             pred_class = torch.argmax(pred, dim=1)
+            error += (pred_class!=class_labels).sum()
+            loss_sum += ce_loss_sum(pred, class_labels)
             all_preds.append(pred_class)
             all_labels.append(class_labels)
+        error = error.item()
+        loss_sum = loss_sum.item()
     hook.remove()
     # Calculate global average and class average feature activations
     all_preds = torch.cat(all_preds)
@@ -189,7 +194,7 @@ def measure_neural_collapse(self, dl, epoch=-1, log=False, error=0, loss=0):
         ncc = (ncc_error.sum()/len(ncc_error)).item()
         self.log['Epochs'].append(epoch)
         self.log['Class Error'].append(error)
-        self.log['CE Loss'].append(loss)
+        self.log['CE Loss'].append(loss_sum)
         self.log['In-Class'].append(in_class)
         self.log['Out-Class'].append(out_class)
         self.log['Covariance'].append(covariance)
