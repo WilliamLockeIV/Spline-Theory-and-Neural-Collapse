@@ -33,7 +33,7 @@ def fit(self, train_dl, optimizer, scheduler, epochs=None, nc_steps=1, val_dl=No
     '''
     # Reset model log
     self.log = {'Epochs':[],'Class Error':[], 'CE Loss':[], 'In-Class':[], 'Out-Class':[], 'Covariance':[], 'Class Norms':[], 'Class Angles':[], 
-                'Class Max Angles':[], 'Linear Norms':[], 'Linear Angles':[], 'Linear Max Angles':[], 'Duality':[], 'NCC':[]}
+                'Class Shifted Angles':[], 'Linear Norms':[], 'Linear Angles':[], 'Linear Shifted Angles':[], 'Duality':[], 'NCC':[]}
     if val_dl is None:
         val_dl = train_dl
     ce_loss = nn.CrossEntropyLoss(reduction='mean')
