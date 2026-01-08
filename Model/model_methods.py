@@ -208,8 +208,7 @@ def measure_neural_collapse(self, dl, epoch=-1, log=False):
         self.log['Duality'].append(self_duality)
         self.log['NCC'].append(ncc)
 
-    return (within_class_cov, between_class_cov, normalized_cov, mean_norms, 
-            mean_angles, weight_norms, weight_angles, duality, ncc_error)
+    return (all_preds, all_labels, all_features)
 
 def evaluate(self, dl):
     with torch.no_grad():
