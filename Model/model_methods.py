@@ -223,11 +223,23 @@ def get_activations(self, name):
 
 
 def get_neural_collapse(self, dl, log=False):
+    '''
+    Calculate neural collapse metrics NC1 - NC4 as described below. NC1 and NC2
+    have multiple metrics assigned to them. Optionally update model log.
+
+    params:
+        dl (DataLoader):  Dataloader over which to calculate neural collapse metrics
+        log (bool):       If True, update self.log with neural collapse metrics
+
+    returns:
+        neural_collapse (dict): A dictionary of neural metrics NC1 - NC4
+    '''
+    # Register hook on penultimate layer
     self.activations = dict()
     name, module = list(self.named_modules())[-2]
     hook = module.register_forward_hook(self.get_activations(name))
 
-    # Run model on all inputs while storing last-layer feature activations
+    # Run model on all inputs while storing feature activations
     with torch.no_grad():
         all_features = []
         all_labels = []
@@ -251,8 +263,12 @@ def get_neural_collapse(self, dl, log=False):
     class_means = {idx:features.mean(dim=0) for idx, features in class_features.items()}
     # Calculate centered class means
     centered_means = {idx:mean - global_mean for idx, mean in class_means.items()}
-    # Extract linear layer weights
-    linear_weights = self.fc.weight.clone().detach()
+    # Extract linear classifier weights and number of classes
+    classifier = list(self.modules())[-1]
+    num_classes = classifier.out_features
+    linear_weights = classifier.weight.detach().clone()
+
+    neural_collapse = dict()
 
     # NC1
     '''
@@ -262,23 +278,45 @@ def get_neural_collapse(self, dl, log=False):
     '''
     class_weights = torch.tensor([features.shape[0] for features in class_features.values()]).to(device)
     class_weights = class_weights / class_weights.sum()
+
     within_class_cov = torch.stack([features.T.cov(correction=0) for features in class_features.values()])
     within_class_cov = (within_class_cov * class_weights[:,None,None]).sum(dim=0)
+
     between_class_cov = {idx:class_means[idx].repeat((features.shape[0],1)) for idx, features in class_features.items()}
     between_class_cov = torch.cat(list(between_class_cov.values())).T.cov(correction=0)
+
     normalized_cov = torch.matmul(within_class_cov, torch.linalg.pinv(between_class_cov))
+
+    neural_collapse['NC1 In-Class'] = within_class_cov.trace().item() / num_classes
+    neural_collapse['NC1 Out-Class'] = between_class_cov.trace().item() / num_classes
+    neural_collapse['NC1 Covariance'] = normalized_cov.trace().item() / num_classes
 
     # NC2
     '''
     Calculate the norms and angles of the centered class means and linear layer weights.
     '''
-    mean_norms = {idx:LA.vector_norm(mean) for idx, mean in centered_means.items()}
-    mean_angles = torch.stack([F.normalize(mean, dim=0) for mean in centered_means.values()])
-    mean_angles = torch.matmul(mean_angles, mean_angles.T)
+    class_norms = {idx:LA.vector_norm(mean) for idx, mean in centered_means.items()}
+    class_norms = torch.stack(list(class_norms.values()))
+    class_norms = (torch.std(class_norms) / torch.mean(class_norms)).item()
 
-    weight_norms = {idx:LA.vector_norm(linear_weights[idx]) for idx in range(linear_weights.shape[0])}
-    weight_angles = F.normalize(linear_weights, dim=1)
-    weight_angles = torch.matmul(weight_angles, weight_angles.T)    
+    class_angles = torch.stack([F.normalize(mean, dim=0) for mean in centered_means.values()])
+    class_angles = torch.matmul(class_angles, class_angles.T)
+    rows, cols = torch.triu_indices(class_angles.shape[0], class_angles.shape[1], offset=1)
+    class_angles = torch.std(class_angles[rows, cols]).item()
+
+    linear_norms = {idx:LA.vector_norm(linear_weights[idx]) for idx in range(linear_weights.shape[0])}
+    linear_norms = torch.stack(list(linear_norms.values()))
+    linear_norms = (torch.std(linear_norms) / torch.mean(linear_norms)).item()
+
+    linear_angles = F.normalize(linear_weights, dim=1)
+    linear_angles = torch.matmul(linear_angles, linear_angles.T)   
+    rows, cols = torch.triu_indices(linear_angles.shape[0], linear_angles.shape[1], offset=1)
+    linear_angles = torch.std(linear_angles[rows, cols]).item()
+
+    neural_collapse['NC2 Class Norms'] = class_norms
+    neural_collapse['NC2 Class Angles'] = class_angles
+    neural_collapse['NC2 Linear Norms'] = linear_norms
+    neural_collapse['NC2 Linear Angles'] = linear_angles
 
     # NC3
     '''
@@ -287,54 +325,46 @@ def get_neural_collapse(self, dl, log=False):
     '''
     normed_classes = torch.stack([mean for mean in centered_means.values()])
     normed_classes = normed_classes / LA.matrix_norm(normed_classes, ord='fro')
+
     normed_weights = linear_weights / LA.matrix_norm(linear_weights, ord='fro')
+
     duality = normed_classes - normed_weights
+    duality = LA.matrix_norm(duality, ord='fro').item()
+
+    neural_collapse['NC3 Self-Duality'] = duality
 
     # NC4
     '''
-    Calculate the proportion of predictions that agree with (or inversely disagree with)
-    Nearest Class Center (NCC) prediction, i.e. selecting the class whose class mean
-    is closest to the last-layer activations.
+    Calculate model disagreement with Nearest Class Center (NCC) prediction, 
+    i.e. selecting the class whose mean is closest to the last-layer activations.
     '''
     all_means = torch.stack(list(class_means.values()))
     nearest_class = all_features[None,:,:] - all_means[:,None,:]
     nearest_class = torch.argmin(LA.vector_norm(nearest_class, dim=2),dim=0)
     ncc_error = (all_preds != nearest_class).cpu()
+    ncc_error = (ncc_error.sum()/len(ncc_error)).item()
+
+    neural_collapse['NC4 Nearest Class'] = ncc_error
 
     # If log == True, update the model's self.log dictionary
     if log is True:
-        in_class = within_class_cov.trace().item()
-        out_class = between_class_cov.trace().item()
-        covariance = normalized_cov.trace().item() / self.fc.out_features
-        class_norms = torch.stack(list(mean_norms.values()))
-        class_norms = (torch.std(class_norms) / torch.mean(class_norms)).item()
-        rows, cols = torch.triu_indices(mean_angles.shape[0], mean_angles.shape[1], offset=1)
-        class_angles = torch.std(mean_angles[rows, cols]).item()
-        class_shift_angles = torch.mean(torch.abs(mean_angles[rows,cols]+1/(self.fc.out_features-1))).item()
-        linear_norms = torch.stack(list(weight_norms.values()))
-        linear_norms = (torch.std(linear_norms) / torch.mean(linear_norms)).item()
-        rows, cols = torch.triu_indices(weight_angles.shape[0], weight_angles.shape[1], offset=1)
-        linear_angles = torch.std(weight_angles[rows, cols]).item()
-        linear_shift_angles = torch.mean(torch.abs(weight_angles[rows,cols]+1/(self.fc.out_features-1))).item()
-        self_duality = LA.matrix_norm(duality, ord='fro').item()
-        ncc = (ncc_error.sum()/len(ncc_error)).item()
-        self.log['In-Class'].append(in_class)
-        self.log['Out-Class'].append(out_class)
-        self.log['Covariance'].append(covariance)
-        self.log['Class Norms'].append(class_norms)
-        self.log['Class Angles'].append(class_angles)
-        self.log['Class Shifted Angles'].append(class_shift_angles)
-        self.log['Linear Norms'].append(linear_norms)
-        self.log['Linear Angles'].append(linear_angles)
-        self.log['Linear Shifted Angles'].append(linear_shift_angles)
-        self.log['Duality'].append(self_duality)
-        self.log['NCC'].append(ncc)
+        self.log['NC1 In-Class'].append(neural_collapse['NC1 In-Class'])
+        self.log['NC1 Out-Class'].append(neural_collapse['NC1 Out-Class'])
+        self.log['NC1 Covariance'].append(neural_collapse['NC1 Covariance'])
+        self.log['NC2 Class Norms'].append(neural_collapse['NC2 Class Norms'])
+        self.log['NC2 Class Angles'].append(neural_collapse['NC2 Class Angles'])
+        self.log['NC2 Linear Norms'].append(neural_collapse['NC2 Linear Norms'])
+        self.log['NC2 Linear Angles'].append(neural_collapse['NC2 Linear Angles'])
+        self.log['NC3 Self-Duality'].append(neural_collapse['NC3 Self-Duality'])
+        self.log['NC4 Nearest Class'].append(neural_collapse['NC4 Nearest Class'])
 
-    return (all_preds, all_labels, all_features)
+    return neural_collapse
 
 
-def get_local_complexity(self, dl, radius=0.015, dim=25, seed=None, log=False):
+def get_local_complexity(self, dl, radius=0.015, dim=None, seed=None, log=False):
     '''
+    Measure local complexity and eccentricity; optionally update model log.
+
     params:
         dl (DataLoader):  Dataloader over which to calculate local complexity
         radius (float):   Radius of convex neighborhood around inputs in which to calculate local
@@ -369,7 +399,7 @@ def get_local_complexity(self, dl, radius=0.015, dim=25, seed=None, log=False):
             image, class_labels = image.to(device), class_labels.to(device)
             samples += len(class_labels)
             image_dim = np.prod(image.shape[1:])
-            if dim is None:
+            if dim is None or dim > image_dim:
                 dim = image_dim
             rand = torch.rand((image_dim, dim), device=device)
             ortho, _ = torch.linalg.qr(rand)
