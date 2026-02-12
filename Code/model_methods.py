@@ -248,7 +248,7 @@ def get_neural_collapse(self, dl, log=False):
             image, class_labels = image.to(device), class_labels.to(device)
             pred = self.forward(image)
             pred_class = torch.argmax(pred, dim=1)
-            all_features.append(self.activations[name])
+            all_features.append(self.activations[name].squeeze())
             all_preds.append(pred_class)
             all_labels.append(class_labels)
     hook.remove()
