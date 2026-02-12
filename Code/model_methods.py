@@ -217,7 +217,7 @@ def get_activations(self, name):
         None, writes activations to model dictionary "activations"
     '''
     def hook(module, input, output):
-        self.activations[name] = output.detach().clone()
+        self.activations[name] = output.detach().cpu().clone()
     return hook
 
 
