@@ -1,5 +1,5 @@
-from data import CharacterDataset
-from model_methods import (
+from .data import CharacterDataset
+from .model_methods import (
     fit,
     evaluate,
     get_activations,
