@@ -38,8 +38,8 @@ def fit(self, train_dl, optimizer, scheduler, epochs=None, neural_collapse=False
                                     calculate neural collapse and local complexity metrics.
 
     Returns:
-        Returns a Pandas DataFrame of self.log, a dictionary storing training loss and classification
-        error across epochs, optionally with neural collapse and local complexity metrics.
+        Returns a Pandas DataFrame of self.log tracking training loss and classification error
+        across epochs, optionally also tracking neural collapse and local complexity metrics.
     '''
     # Reset model log and optional metric logs
     self.log = {'Epochs':[],'Class Error':[], 'CE Loss':[]} 
@@ -168,6 +168,7 @@ def fit(self, train_dl, optimizer, scheduler, epochs=None, neural_collapse=False
                 _ = self.get_local_complexity(eval_dl, lc_radius, lc_dim, lc_seed, log=True)
             self.train()
 
+    # Record metrics after last epoch if not already recorded
     if epoch != self.log['Epochs'][-1]:
         self.log['Epochs'].append(epoch)
         self.eval()
@@ -187,12 +188,25 @@ def fit(self, train_dl, optimizer, scheduler, epochs=None, neural_collapse=False
             _ = self.get_neural_collapse(eval_dl, log=True)
         if local_complexity is True:
             _ = self.get_local_complexity(eval_dl, lc_radius, lc_dim, lc_seed, log=True)
-        self.train()    
+        self.train()
+
+    # Convert log dictionary to dataframe and return 
     log = pd.DataFrame(self.log).set_index('Epochs')
+
     return log
 
 
 def evaluate(self, dl):
+    '''
+    Calculate both classification error (1-0 error) and cross-entropy loss
+
+    params:
+        dl: Dataloader over which to calculate error and loss
+
+    returns:
+        error: Classification error
+        loss:  Cross-Entropy loss
+    '''
     with torch.no_grad():
         ce_loss = nn.CrossEntropyLoss(reduction='mean')
         error = 0
@@ -210,6 +224,8 @@ def evaluate(self, dl):
 
 def get_activations(self, name):
     '''
+    Register hooks in specified layer to record activations. Called in other methods.
+
     params:
         name (string): Name of layer to store activations
 
@@ -436,6 +452,7 @@ def get_local_complexity(self, dl, radius=0.015, dim=None, seed=None, log=False)
 
 def get_partitions(self, x_span, y_span):
     '''
+    Calculate partitions, i.e. level-sets of the hyperplanes in each layer of the model. 
     params:
         x_span (tuple): Tuple of the form (x_min, x_max, x_samples) indicating the minimum and maximum x-values
                         over which to calculate partitions and the number of samples within that range.
@@ -447,10 +464,14 @@ def get_partitions(self, x_span, y_span):
     '''
     self.activations = dict()
     partitions = dict()
+
+    # Calculate output over uniform grid in the input space
     x_span = np.linspace(*x_span)
     y_span = np.linspace(*y_span)
     meshgrid = np.meshgrid(x_span, y_span)
     uniform_input = torch.tensor(np.stack([meshgrid[0].reshape(-1), meshgrid[1].reshape(-1)], 1), dtype=torch.float32)
+
+    # Register hooks and save activations on all Linear and Convolutional layers in model
     hooks = []
     for name, module in self.named_modules():
         if isinstance(module, torch.nn.Linear) or isinstance(module, torch.nn.Conv2d):
@@ -459,6 +480,9 @@ def get_partitions(self, x_span, y_span):
         self.forward(uniform_input)
     for hook in hooks:
         hook.remove()
+
+    # For each neuron in each layer, trace the contours where that neuron==0 (i.e. the level set of the hyperplane),
+    # then record and return the vertices of those contours in a dictionary.
     for layer, activation in self.activations.items():
         paths = [plt.contour(
             meshgrid[0], meshgrid[1], activation[:,i].reshape(meshgrid[0].shape), [0]
