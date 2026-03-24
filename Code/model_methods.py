@@ -68,9 +68,9 @@ def fit(self, train_dl, optimizer, scheduler, epochs=None, neural_collapse=False
         error = 0
         loss_sum = 0
         for batch in eval_dl:
-            image, class_labels = batch
-            image, class_labels = image.to(device), class_labels.to(device)
-            pred = self.forward(image)
+            inputs, class_labels = batch
+            inputs, class_labels = inputs.to(device), class_labels.to(device)
+            pred = self.forward(inputs)
             pred_class = torch.argmax(pred, dim=1)
             error += (pred_class!=class_labels).sum()
             loss_sum += ce_loss_sum(pred, class_labels)
@@ -92,9 +92,9 @@ def fit(self, train_dl, optimizer, scheduler, epochs=None, neural_collapse=False
             loss_sum = 0
             for batch in train_dl:
                 optimizer.zero_grad()
-                image, class_labels = batch
-                image, class_labels = image.to(device), class_labels.to(device)
-                pred = self.forward(image)
+                inputs, class_labels = batch
+                inputs, class_labels = inputs.to(device), class_labels.to(device)
+                pred = self.forward(inputs)
                 pred_class = torch.argmax(pred, dim=1)
                 error += (pred_class!=class_labels).sum()
                 loss_mean = ce_loss(pred, class_labels)
@@ -112,9 +112,9 @@ def fit(self, train_dl, optimizer, scheduler, epochs=None, neural_collapse=False
                     error = 0
                     loss_sum = 0
                     for batch in eval_dl:
-                        image, class_labels = batch
-                        image, class_labels = image.to(device), class_labels.to(device)
-                        pred = self.forward(image)
+                        inputs, class_labels = batch
+                        inputs, class_labels = inputs.to(device), class_labels.to(device)
+                        pred = self.forward(inputs)
                         pred_class = torch.argmax(pred, dim=1)
                         error += (pred_class!=class_labels).sum()
                         loss_sum += ce_loss_sum(pred, class_labels)
@@ -134,9 +134,9 @@ def fit(self, train_dl, optimizer, scheduler, epochs=None, neural_collapse=False
         loss_sum = 0
         for batch in train_dl:
             optimizer.zero_grad()
-            image, class_labels = batch
-            image, class_labels = image.to(device), class_labels.to(device)
-            pred = self.forward(image)
+            inputs, class_labels = batch
+            inputs, class_labels = inputs.to(device), class_labels.to(device)
+            pred = self.forward(inputs)
             pred_class = torch.argmax(pred, dim=1)
             error += (pred_class!=class_labels).sum()
             loss_mean = ce_loss(pred, class_labels)
@@ -154,9 +154,9 @@ def fit(self, train_dl, optimizer, scheduler, epochs=None, neural_collapse=False
                 error = 0
                 loss_sum = 0
                 for batch in eval_dl:
-                    image, class_labels = batch
-                    image, class_labels = image.to(device), class_labels.to(device)
-                    pred = self.forward(image)
+                    inputs, class_labels = batch
+                    inputs, class_labels = inputs.to(device), class_labels.to(device)
+                    pred = self.forward(inputs)
                     pred_class = torch.argmax(pred, dim=1)
                     error += (pred_class!=class_labels).sum()
                     loss_sum += ce_loss_sum(pred, class_labels)
@@ -176,9 +176,9 @@ def fit(self, train_dl, optimizer, scheduler, epochs=None, neural_collapse=False
             error = 0
             loss_sum = 0
             for batch in eval_dl:
-                image, class_labels = batch
-                image, class_labels = image.to(device), class_labels.to(device)
-                pred = self.forward(image)
+                inputs, class_labels = batch
+                inputs, class_labels = inputs.to(device), class_labels.to(device)
+                pred = self.forward(inputs)
                 pred_class = torch.argmax(pred, dim=1)
                 error += (pred_class!=class_labels).sum()
                 loss_sum += ce_loss_sum(pred, class_labels)
@@ -212,9 +212,9 @@ def evaluate(self, dl):
         error = 0
         loss_sum = 0
         for batch in dl:
-            image, class_labels = batch
-            image, class_labels = image.to(device), class_labels.to(device)
-            pred = self.forward(image)
+            inputs, class_labels = batch
+            inputs, class_labels = inputs.to(device), class_labels.to(device)
+            pred = self.forward(inputs)
             pred_class = torch.argmax(pred, dim=1)
             loss_mean = ce_loss(pred, class_labels)
             loss_sum += loss_mean * len(batch)
@@ -235,6 +235,182 @@ def get_activations(self, name):
     def hook(module, input, output):
         self.activations[name] = output.detach().clone()
     return hook
+
+
+def get_distance(self, x1, x2, layers=None):
+    '''
+    Get quantized distance between two inputs, x1 and x2, based on the number of
+    partitions separating the two points.
+
+    params:
+        x1, x2 (tensors): Data points to calculate distance between
+        layers (list): List of layer names over which to calculate distance. If None,
+                       calculate distance over all layers.
+    
+    returns:
+        distance (float): Distance calculated as the number of partitions separating
+                          the two points divided by the total number of partitions.
+    '''
+    self.activations = dict()
+
+    # Register hooks on specified layers or else on all Linear and Convolutional layers
+    hooks = []
+    for name, module in self.named_modules():
+        if layers is not None:
+            if name in layers:
+                hooks.append(module.register_forward_hook(self.get_activations[name]))
+        else:
+            if isinstance(module, torch.nn.Linear) or isinstance(module, torch.nn.Conv2d):
+                hooks.append(module.register_forward_hook(self.get_activations[name]))
+
+    # Stack both data points and feed them thru the model
+    inputs = torch.stack([x1, x2]).to(device)
+    with torch.no_grad():
+        _ = self.forward(inputs)
+
+    for hook in hooks:
+        hook.remove()
+
+    # Calculate distance as the number of partitions separating the points / all partitions
+    activation = torch.cat([self.activations[layer] for layer in self.activations], dim=-1)
+    signs = torch.sign(activation)
+    distance = (signs[0] != signs[1]).float().mean()
+
+    return distance.item()
+
+
+def get_local_complexity(self, dl, radius=0.015, dim=None, seed=None, log=False):
+    '''
+    Measure local complexity and eccentricity; optionally update model log.
+
+    params:
+        dl (DataLoader):  Dataloader over which to calculate local complexity
+        radius (float):   Radius of convex neighborhood around inputs in which to calculate local
+                          complexity. Smaller values tend to be deformed less by deep networks.
+        dim (int):        Number of dimensions of convex neighborhood. If None, will default to
+                          number of input dimensions.
+        seed (int):       The verticesgonal hulls around datapoints are oriented randomly. Set an integer
+                          seed for reproducibility between function calls. If dim=1, orientation is
+                          always the same regardless of seed or lack thereof.
+        log (bool):       If True, update self.log with total local complexity.
+
+    returns:
+        local_complexity (dict): Nested dictionary of {layer: {Complexity:float, Eccentricity:float}},
+                                along with a final key of {Total: {Complexity:float, Eccentricity:float}}
+                                for the entire model.
+    '''
+    self.activations = dict()
+    hooks = []
+    samples = 0
+    local_complexity = dict()
+
+    # Register hooks on all Linear and Convolutional layers; add layer names to local_complexity dictionary
+    for name, module in self.named_modules():
+        if isinstance(module, torch.nn.Linear) or isinstance(module, torch.nn.Conv2d):
+            hooks.append(module.register_forward_hook(self.get_activations(name)))
+            local_complexity[name] = {'Complexity':0, 'Eccentricity':0}
+
+    # Optionally set seed to determine orientation of complex hulls around samples
+    if seed is not None:
+        torch.manual_seed(seed)
+
+    # Run dataset and convex hulls around each data point thru model
+    with torch.no_grad():
+        for batch in dl:
+            inputs, class_labels = batch
+            inputs, class_labels = inputs.to(device), class_labels.to(device)
+            samples += len(class_labels)
+
+            # If dimension of convex hulls not specified, use input dimension
+            input_dim = np.prod(inputs.shape[1:])
+            if dim is None or dim > input_dim:
+                dim = input_dim
+
+            # Create vertices of convex hull around each data point, feed these
+            rand = torch.rand((input_dim, dim), device=device)
+            vertices, _ = torch.linalg.qr(rand)
+            vertices = vertices.reshape((dim, *inputs.shape[1:]))
+            vertices = vertices * radius
+
+            # Convex hulls are original data point +/- orthogonal vertices. Reshape as "input_hulls" to feed into model.
+            convex_hulls = torch.cat([inputs[:,None], inputs[:,None] + vertices, inputs[:,None] - vertices], dim=1)
+            input_hulls = convex_hulls.reshape(convex_hulls.shape[0] * convex_hulls.shape[1], *convex_hulls.shape[2:])
+            _ = self.forward(input_hulls)
+
+            for layer, activation in self.activations.items():
+                # Group activations for each convex hull, calculate eccentricity and complexity using those hulls.
+                activation = activation.reshape(convex_hulls.shape[0], convex_hulls.shape[1], -1)
+                eccentricity = torch.cdist(activation, activation).amax(dim=(1,2)).sum()
+                signs = torch.sign(activation)
+                complexity = (signs[:,1:] != signs[:,:1]).any(dim=1).sum()
+                local_complexity[layer]['Complexity'] += complexity.item()
+                local_complexity[layer]['Eccentricity'] += eccentricity.item()
+
+    for hook in hooks:
+        hook.remove()
+
+    # Divide local complexity of each layer by number of neurons in the layer to normalize values
+    for layer, dictionary in local_complexity.items():
+        for key in dictionary.keys():
+            local_complexity[layer][key] /= samples
+
+    # Calculate average local complexity and max eccentricity across model, optionally save in self.log
+    total_complexity = sum([local_complexity[layer]['Complexity'] for layer in local_complexity.keys()])
+    max_eccentricity = max([local_complexity[layer]['Eccentricity'] for layer in local_complexity.keys()])
+    local_complexity['Total'] = {'Complexity':total_complexity, 'Eccentricity':max_eccentricity}
+
+    if log is True:
+        self.log['Local Complexity'].append(local_complexity['Total']['Complexity'])
+        self.log['Eccentricity'].append(local_complexity['Total']['Eccentricity'])
+
+    return local_complexity
+
+
+def get_partitions(self, x_span, y_span):
+    '''
+    For 2D inputs, calculate the partitions, i.e. the level-sets of hyperplanes, in each layer of the model.
+    This can then be used to visualize the partitions in the 2D input space.
+
+    params:
+        x_span (tuple): Tuple of the form (x_min, x_max, x_samples) indicating the minimum and maximum x-values
+                        over which to calculate partitions and the number of samples within that range.
+        y_span (tuple): Tuple of the form (y_min, y_max, y_samples), same purpose as for x_span but for y-dimension.
+
+    returns:
+        partitions (dict): Dictionary of {layer:vertices} storing vertices that can be used to graph the partitions
+                           drawn by each layer's neurons.
+    '''
+    self.activations = dict()
+    partitions = dict()
+
+    # Calculate output over uniform grid in the input space
+    x_span = np.linspace(*x_span)
+    y_span = np.linspace(*y_span)
+    meshgrid = np.meshgrid(x_span, y_span)
+    uniform_input = torch.tensor(np.stack([meshgrid[0].reshape(-1), meshgrid[1].reshape(-1)], 1), dtype=torch.float32)
+
+    # Register hooks and save activations on all Linear and Convolutional layers in model
+    hooks = []
+    for name, module in self.named_modules():
+        if isinstance(module, torch.nn.Linear) or isinstance(module, torch.nn.Conv2d):
+            hooks.append(module.register_forward_hook(self.get_activations(name)))
+    with torch.no_grad():
+        self.forward(uniform_input)
+    for hook in hooks:
+        hook.remove()
+
+    # For each neuron in each layer, trace the contours where that neuron==0 (i.e. the level set of the hyperplane),
+    # then record and return the vertices of those contours in a dictionary.
+    for layer, activation in self.activations.items():
+        paths = [plt.contour(
+            meshgrid[0], meshgrid[1], activation[:,i].reshape(meshgrid[0].shape), [0]
+        ) for i in range(activation.shape[1])]
+        paths = [path.get_paths()[0] for path in paths]
+        plt.close()
+        paths = [path.vertices[:-1] for path in paths]
+        partitions[layer] = paths
+
+    return partitions
 
 
 def get_neural_collapse(self, dl, log=False):
@@ -260,9 +436,9 @@ def get_neural_collapse(self, dl, log=False):
         all_labels = []
         all_preds = []
         for batch in dl:
-            image, class_labels = batch
-            image, class_labels = image.to(device), class_labels.to(device)
-            pred = self.forward(image)
+            inputs, class_labels = batch
+            inputs, class_labels = inputs.to(device), class_labels.to(device)
+            pred = self.forward(inputs)
             pred_class = torch.argmax(pred, dim=1)
             all_features.append(self.activations[name].squeeze())
             all_preds.append(pred_class)
@@ -374,122 +550,3 @@ def get_neural_collapse(self, dl, log=False):
         self.log['NC4 Nearest Class'].append(neural_collapse['NC4 Nearest Class'])
 
     return neural_collapse
-
-
-def get_local_complexity(self, dl, radius=0.015, dim=None, seed=None, log=False):
-    '''
-    Measure local complexity and eccentricity; optionally update model log.
-
-    params:
-        dl (DataLoader):  Dataloader over which to calculate local complexity
-        radius (float):   Radius of convex neighborhood around inputs in which to calculate local
-                          complexity. Smaller values tend to be deformed less by deep networks.
-        dim (int):        Number of dimensions of convex neighborhood. If None, will default to
-                          number of input dimensions.
-        seed (int):       The orthogonal hulls around datapoints are oriented randomly. Set an integer
-                          seed for reproducibility between function calls. If dim=1, orientation is
-                          always the same regardless of seed or lack thereof.
-        log (bool):       If True, update self.log with total local complexity.
-
-    returns:
-        local_complexity (dict): Nested dictionary of {layer: {Complexity:float, Eccentricity:float}},
-                                along with a final key of {Total: {Complexity:float, Eccentricity:float}}
-                                for the entire model.
-    '''
-    self.activations = dict()
-    hooks = []
-    samples = 0
-    local_complexity = dict()
-    for name, module in self.named_modules():
-        if isinstance(module, torch.nn.Linear) or isinstance(module, torch.nn.Conv2d):
-            hooks.append(module.register_forward_hook(self.get_activations(name)))
-            local_complexity[name] = {'Complexity':0, 'Eccentricity':0}
-
-    if seed is not None:
-        torch.manual_seed(seed)
-
-    with torch.no_grad():
-        for batch in dl:
-            image, class_labels = batch
-            image, class_labels = image.to(device), class_labels.to(device)
-            samples += len(class_labels)
-            image_dim = np.prod(image.shape[1:])
-            if dim is None or dim > image_dim:
-                dim = image_dim
-            rand = torch.rand((image_dim, dim), device=device)
-            ortho, _ = torch.linalg.qr(rand)
-            ortho = ortho.reshape((dim, *image.shape[1:]))
-            ortho = ortho * radius
-            ortho_hulls = torch.cat([image[:,None], image[:,None] + ortho, image[:,None] - ortho], dim=1)
-            input_hulls = ortho_hulls.reshape(ortho_hulls.shape[0] * ortho_hulls.shape[1], *ortho_hulls.shape[2:])
-            _ = self.forward(input_hulls)
-
-            for layer, activation in self.activations.items():
-                activation = activation.reshape(ortho_hulls.shape[0], ortho_hulls.shape[1], -1)
-                eccentricity = torch.cdist(activation, activation).amax(dim=(1,2)).sum()
-                signs = torch.sign(activation)
-                complexity = (signs[:,1:] != signs[:,:1]).any(dim=1).sum()
-                local_complexity[layer]['Complexity'] += complexity.item()
-                local_complexity[layer]['Eccentricity'] += eccentricity.item()
-
-    for hook in hooks:
-        hook.remove()
-
-    for layer, dictionary in local_complexity.items():
-        for key in dictionary.keys():
-            local_complexity[layer][key] /= samples
-
-    total_complexity = sum([local_complexity[layer]['Complexity'] for layer in local_complexity.keys()])
-    max_eccentricity = max([local_complexity[layer]['Eccentricity'] for layer in local_complexity.keys()])
-    local_complexity['Total'] = {'Complexity':total_complexity, 'Eccentricity':max_eccentricity}
-
-    if log is True:
-        self.log['Local Complexity'].append(local_complexity['Total']['Complexity'])
-        self.log['Eccentricity'].append(local_complexity['Total']['Eccentricity'])
-
-    return local_complexity
-
-
-def get_partitions(self, x_span, y_span):
-    '''
-    Calculate partitions, i.e. level-sets of the hyperplanes in each layer of the model. 
-    params:
-        x_span (tuple): Tuple of the form (x_min, x_max, x_samples) indicating the minimum and maximum x-values
-                        over which to calculate partitions and the number of samples within that range.
-        y_span (tuple): Tuple of the form (y_min, y_max, y_samples), same purpose as for x_span but for y-dimension.
-
-    returns:
-        partitions (dict): Dictionary of {layer:vertices} storing vertices that can be used to graph the partitions
-                           drawn by each layer's neurons.
-    '''
-    self.activations = dict()
-    partitions = dict()
-
-    # Calculate output over uniform grid in the input space
-    x_span = np.linspace(*x_span)
-    y_span = np.linspace(*y_span)
-    meshgrid = np.meshgrid(x_span, y_span)
-    uniform_input = torch.tensor(np.stack([meshgrid[0].reshape(-1), meshgrid[1].reshape(-1)], 1), dtype=torch.float32)
-
-    # Register hooks and save activations on all Linear and Convolutional layers in model
-    hooks = []
-    for name, module in self.named_modules():
-        if isinstance(module, torch.nn.Linear) or isinstance(module, torch.nn.Conv2d):
-            hooks.append(module.register_forward_hook(self.get_activations(name)))
-    with torch.no_grad():
-        self.forward(uniform_input)
-    for hook in hooks:
-        hook.remove()
-
-    # For each neuron in each layer, trace the contours where that neuron==0 (i.e. the level set of the hyperplane),
-    # then record and return the vertices of those contours in a dictionary.
-    for layer, activation in self.activations.items():
-        paths = [plt.contour(
-            meshgrid[0], meshgrid[1], activation[:,i].reshape(meshgrid[0].shape), [0]
-        ) for i in range(activation.shape[1])]
-        paths = [path.get_paths()[0] for path in paths]
-        plt.close()
-        paths = [path.vertices[:-1] for path in paths]
-        partitions[layer] = paths
-
-    return partitions
